@@ -12,7 +12,7 @@ struct Manga {
     title: String,
     urls: Vec<String>,
     chapter: i16,
-    chapter_title: String,
+    chapter_title: Option<String>,
 }
 
 trait MangaParser {
@@ -34,11 +34,12 @@ impl ParseHelper {
         number
     }
 
-    fn get_string_post_separator(mut string: String, separator: char) -> String {
-        string
-            .split_off(string.find(separator).unwrap_or(string.len()))
-            .trim()
-            .to_string()
+    fn get_string_post_separator(mut string: String, separator: char) -> Option<String> {
+        let index = string.find(separator)?;
+        match string.split_off(index).trim().to_string() {
+            s if s.is_empty() => None,
+            s => Some(s),
+        }
     }
 }
 
@@ -64,7 +65,7 @@ impl MangaParser for AsuraScansParser {
             .join("");
 
         let chapter_number = ParseHelper::get_first_number_from_string(&raw_chapter_title);
-        let chapter_title: String = ParseHelper::get_string_post_separator(raw_chapter_title, ':');
+        let chapter_title = ParseHelper::get_string_post_separator(raw_chapter_title, ':');
         Ok(Manga {
             id: -1,
             title: String::from(title.trim()),
@@ -108,8 +109,9 @@ async fn main() {
         for manga in &mangas {
             for url in &manga.urls {
                 let res = client.get(url).send().await.expect("Error sending request");
-                // let hmtl = &res.text().await.expect("Error reading response");
-                println!("{:?}", &res);
+                let hmtl = &res.text().await.expect("Error reading response");
+                let parsed_manga = AsuraScansParser::parse(hmtl, url.to_string()).unwrap();
+                println!("{:?}", parsed_manga);
             }
         }
     }

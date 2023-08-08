@@ -4,11 +4,11 @@ PASSWORD 'mangakapwd';
 
 CREATE TABLE public.manga
 (
-    id smallserial NOT NULL,
+    id smallserial,
     title character varying(40) NOT NULL,
     chapter smallint NOT NULL,
     chapter_title character varying(40),
-    urls text[] NOT NULL,
+    urls varchar(255)[] NOT NULL,
     PRIMARY KEY (id)
 );
 

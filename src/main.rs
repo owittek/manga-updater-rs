@@ -8,18 +8,29 @@ use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 #[allow(dead_code)]
 #[derive(Debug)]
 struct Manga {
-    id: i16,
+    id: Option<i16>,
     title: String,
+    image_url: Option<String>,
     urls: Vec<String>,
     chapter: i16,
     chapter_title: Option<String>,
 }
 
-trait MangaParser {
-    fn parse(deserialized_html: &str, url: String) -> Result<Manga, Box<dyn Error>>;
+impl dyn MangaParser {
+    fn new(url: &str) -> impl MangaParser {
+        let url = Url::parse(url).expect("Error parsing URL");
+        match url.host_str().unwrap() {
+            "asura.gg" => AsuraScansParser,
+            _ => panic!("TBD"),
+        }
+    }
 }
 
-struct ParseHelper {}
+trait MangaParser {
+    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, Box<dyn Error>>;
+}
+
+struct ParseHelper;
 
 impl ParseHelper {
     fn get_first_number_from_string(string: &str) -> String {
@@ -41,36 +52,78 @@ impl ParseHelper {
             s => Some(s),
         }
     }
+
+    fn get_text_from_first_result(
+        deserialized_html: &str,
+        selector: &Selector,
+    ) -> Result<String, Box<dyn Error>> {
+        let html = Html::parse_document(deserialized_html);
+        let first_el = match html.select(selector).next() {
+            Some(e) => e,
+            None => return Err("no element found".into()),
+        };
+
+        let text = first_el
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
+
+        Ok(text)
+    }
+
+    fn get_src_from_first_result(
+        deserialized_html: &str,
+        selector: &Selector,
+    ) -> Result<String, Box<dyn Error>> {
+        let html = Html::parse_document(deserialized_html);
+        let first_el = match html.select(selector).next() {
+            Some(e) => e,
+            None => return Err("no element found".into()),
+        };
+
+        match first_el.value().attr("src") {
+            Some(image_url) => Ok(image_url.to_string()),
+            None => Err("no src attribute found".into()),
+        }
+    }
 }
 
-struct AsuraScansParser {}
+struct AsuraScansParser;
 
 impl MangaParser for AsuraScansParser {
-    fn parse(deserialized_html: &str, url: String) -> Result<Manga, Box<dyn Error>> {
-        let html = Html::parse_document(deserialized_html);
-        let raw_chapter_title = html
-            .select(&Selector::parse("#chapterlist > ul")?)
-            .next()
-            .unwrap()
-            .text()
-            .collect::<Vec<_>>()
-            .join("");
+    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, Box<dyn Error>> {
+        let raw_chapter_title = ParseHelper::get_text_from_first_result(
+            deserialized_html,
+            &Selector::parse("#chapterlist > ul")?,
+        )?;
 
-        let title = html
-            .select(&Selector::parse("h1")?)
-            .next()
-            .unwrap()
-            .text()
-            .collect::<Vec<_>>()
-            .join("");
+        let title =
+            ParseHelper::get_text_from_first_result(deserialized_html, &Selector::parse("h1")?)?;
 
         let chapter_number = ParseHelper::get_first_number_from_string(&raw_chapter_title);
         let chapter_title = ParseHelper::get_string_post_separator(raw_chapter_title, ':');
+        let image_url = match ParseHelper::get_src_from_first_result(
+            deserialized_html,
+            &Selector::parse("img.attachment-.size-.wp-post-image")?,
+        ) {
+            Ok(image_url) => Some(image_url),
+            Err(e) => {
+                // TODO: custom error to throw if element does not exist
+                println!("Error getting image URL: {}", e);
+                None
+            }
+        };
+
         Ok(Manga {
-            id: -1,
-            title: String::from(title.trim()),
-            urls: vec![url],
-            chapter: chapter_number.parse::<i16>().unwrap(),
+            id: None,
+            title,
+            image_url,
+            urls: vec![url.to_string()],
+            chapter: chapter_number
+                .parse::<i16>()
+                .expect("Error parsing chapter number"),
             chapter_title,
         })
     }
@@ -105,6 +158,19 @@ async fn main() {
         .build()
         .expect("Error creating a request client");
 
+    let test_url = "https://asura.gg/manga/0223090894-return-of-the-mount-hua-sect/";
+    let res = client
+        .get(test_url)
+        .send()
+        .await
+        .expect("Error sending request");
+    let html = &res.text().await.expect("Error reading response");
+    let parsed_manga = <dyn MangaParser>::new(test_url)
+        .parse(html, test_url)
+        .unwrap();
+    println!("{:?}", parsed_manga);
+
+    /*
     loop {
         for manga in &mangas {
             for url in &manga.urls {
@@ -115,6 +181,7 @@ async fn main() {
             }
         }
     }
+    */
 }
 
 fn get_db_url() -> String {
@@ -164,4 +231,11 @@ async fn get_db_client(db_url: &str, pool_size: u32) -> Pool<Postgres> {
             panic!("{}", e)
         }
     }
+}
+
+async fn add_manga(client: &reqwest::Client, pool: &Pool<Postgres>, url: &str) {
+    let res = client.get(url).send().await.expect("Error sending request");
+    let html = res.text().await.expect("Error reading response");
+    let manga = <dyn MangaParser>::new(url).parse(&html, url).unwrap();
+    // sqlx::query_as!(Manga, "INSERT INTO manga (title, image_url, urls, chapter, chapter_title) VALUES ($1, $2, $3, $4, $5)", manga.title, manga.image_url, &manga.urls, manga.chapter, manga.chapter_title).execute(pool).await.unwrap();
 }

@@ -1,11 +1,9 @@
-use std::error::Error;
-
 use reqwest::Url;
 use scraper::{Html, Selector};
 use spinners::{Spinner, Spinners};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use thiserror::Error;
 
-#[allow(dead_code)]
 #[derive(Debug)]
 struct Manga {
     id: Option<i16>,
@@ -16,18 +14,28 @@ struct Manga {
     chapter_title: Option<String>,
 }
 
+#[derive(Error, Debug)]
+pub enum ParserError {
+    #[error("DOM element not found")]
+    ElementNotFound,
+    #[error("attribute of element not found")]
+    AttributeNotFound,
+    #[error("host is either not supported or not found")]
+    HostNotFound,
+}
+
 impl dyn MangaParser {
-    fn new(url: &str) -> impl MangaParser {
+    fn new(url: &str) -> Result<impl MangaParser, ParserError> {
         let url = Url::parse(url).expect("Error parsing URL");
         match url.host_str().unwrap() {
-            "asura.gg" => AsuraScansParser,
-            _ => panic!("TBD"),
+            "asura.gg" => Ok(AsuraScansParser),
+            _ => Err(ParserError::HostNotFound),
         }
     }
 }
 
 trait MangaParser {
-    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, Box<dyn Error>>;
+    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, ParserError>;
 }
 
 struct ParseHelper;
@@ -56,11 +64,11 @@ impl ParseHelper {
     fn get_text_from_first_result(
         deserialized_html: &str,
         selector: &Selector,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<String, ParserError> {
         let html = Html::parse_document(deserialized_html);
         let first_el = match html.select(selector).next() {
             Some(e) => e,
-            None => return Err("no element found".into()),
+            None => return Err(ParserError::ElementNotFound),
         };
 
         let text = first_el
@@ -76,16 +84,16 @@ impl ParseHelper {
     fn get_src_from_first_result(
         deserialized_html: &str,
         selector: &Selector,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<String, ParserError> {
         let html = Html::parse_document(deserialized_html);
         let first_el = match html.select(selector).next() {
             Some(e) => e,
-            None => return Err("no element found".into()),
+            None => return Err(ParserError::ElementNotFound),
         };
 
         match first_el.value().attr("src") {
             Some(image_url) => Ok(image_url.to_string()),
-            None => Err("no src attribute found".into()),
+            None => Err(ParserError::AttributeNotFound),
         }
     }
 }
@@ -93,25 +101,26 @@ impl ParseHelper {
 struct AsuraScansParser;
 
 impl MangaParser for AsuraScansParser {
-    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, Box<dyn Error>> {
+    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, ParserError> {
         let raw_chapter_title = ParseHelper::get_text_from_first_result(
             deserialized_html,
-            &Selector::parse("#chapterlist > ul")?,
+            &Selector::parse("#chapterlist > ul").unwrap(),
         )?;
 
-        let title =
-            ParseHelper::get_text_from_first_result(deserialized_html, &Selector::parse("h1")?)?;
+        let title = ParseHelper::get_text_from_first_result(
+            deserialized_html,
+            &Selector::parse("h1").unwrap(),
+        )?;
 
         let chapter_number = ParseHelper::get_first_number_from_string(&raw_chapter_title);
         let chapter_title = ParseHelper::get_string_post_separator(raw_chapter_title, ':');
         let image_url = match ParseHelper::get_src_from_first_result(
             deserialized_html,
-            &Selector::parse("img.attachment-.size-.wp-post-image")?,
+            &Selector::parse("img.attachment-.size-.wp-post-image").unwrap(),
         ) {
             Ok(image_url) => Some(image_url),
             Err(e) => {
-                // TODO: custom error to throw if element does not exist
-                println!("Error getting image URL: {}", e);
+                println!("error getting the image for {}: {}", title, e);
                 None
             }
         };
@@ -123,7 +132,7 @@ impl MangaParser for AsuraScansParser {
             urls: vec![url.to_string()],
             chapter: chapter_number
                 .parse::<i16>()
-                .expect("Error parsing chapter number"),
+                .expect("error parsing chapter number"),
             chapter_title,
         })
     }
@@ -147,11 +156,10 @@ async fn main() {
     let db_url = get_db_url();
     let pool = get_db_client(db_url.as_str(), 5).await;
 
-    let mangas = sqlx::query_as!(Manga, "SELECT * FROM manga")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    println!("{:?}", mangas);
+    // let mangas = sqlx::query_as!(Manga, "SELECT * FROM manga")
+    //     .fetch_all(&pool)
+    //     .await
+    //     .unwrap();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -166,9 +174,14 @@ async fn main() {
         .expect("Error sending request");
     let html = &res.text().await.expect("Error reading response");
     let parsed_manga = <dyn MangaParser>::new(test_url)
+        .unwrap()
         .parse(html, test_url)
         .unwrap();
-    println!("{:?}", parsed_manga);
+    let mut message = format!("{} - Chapter {}", parsed_manga.title, parsed_manga.chapter);
+    if let Some(chapter_title) = parsed_manga.chapter_title {
+        message.push_str(&format!(": {}", chapter_title));
+    }
+    println!("{}", message);
 
     /*
     loop {
@@ -233,9 +246,29 @@ async fn get_db_client(db_url: &str, pool_size: u32) -> Pool<Postgres> {
     }
 }
 
-async fn add_manga(client: &reqwest::Client, pool: &Pool<Postgres>, url: &str) {
+#[allow(dead_code)]
+async fn add_manga(
+    client: &reqwest::Client,
+    pool: &Pool<Postgres>,
+    url: &str,
+) -> Result<Manga, ParserError> {
     let res = client.get(url).send().await.expect("Error sending request");
     let html = res.text().await.expect("Error reading response");
-    let manga = <dyn MangaParser>::new(url).parse(&html, url).unwrap();
-    // sqlx::query_as!(Manga, "INSERT INTO manga (title, image_url, urls, chapter, chapter_title) VALUES ($1, $2, $3, $4, $5)", manga.title, manga.image_url, &manga.urls, manga.chapter, manga.chapter_title).execute(pool).await.unwrap();
+    let mut manga = <dyn MangaParser>::new(url)?.parse(&html, url)?;
+    let res = sqlx::query!(
+        r#"
+    INSERT INTO manga (title, image_url, urls, chapter, chapter_title)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id;"#,
+        manga.title,
+        manga.image_url,
+        &manga.urls,
+        manga.chapter,
+        manga.chapter_title
+    )
+    .fetch_one(pool)
+    .await;
+
+    manga.id = Some(res.unwrap().id);
+    Ok(manga)
 }

@@ -2228,6 +2228,7 @@ dependencies = [
  "serde",
  "spinners",
  "sqlx",
+ "thiserror",
  "tokio",
  "url",
 ]

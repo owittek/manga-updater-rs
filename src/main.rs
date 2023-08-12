@@ -1,8 +1,10 @@
-use reqwest::Url;
-use scraper::{Html, Selector};
+pub mod parser;
+
+use crate::parser::MangaParser;
+use parser::ParserError;
+use reqwest::{Client, Url};
 use spinners::{Spinner, Spinners};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
-use thiserror::Error;
 
 #[derive(Debug)]
 struct Manga {
@@ -12,130 +14,6 @@ struct Manga {
     urls: Vec<String>,
     chapter: i16,
     chapter_title: Option<String>,
-}
-
-#[derive(Error, Debug)]
-pub enum ParserError {
-    #[error("DOM element not found")]
-    ElementNotFound,
-    #[error("attribute of element not found")]
-    AttributeNotFound,
-    #[error("host is either not supported or not found")]
-    HostNotFound,
-}
-
-impl dyn MangaParser {
-    fn new(url: &str) -> Result<impl MangaParser, ParserError> {
-        let url = Url::parse(url).expect("Error parsing URL");
-        match url.host_str().unwrap() {
-            "asura.gg" => Ok(AsuraScansParser),
-            _ => Err(ParserError::HostNotFound),
-        }
-    }
-}
-
-trait MangaParser {
-    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, ParserError>;
-}
-
-struct ParseHelper;
-
-impl ParseHelper {
-    fn get_first_number_from_string(string: &str) -> String {
-        let mut number = String::new();
-        for c in string.chars() {
-            if c.is_ascii_digit() {
-                number.push(c);
-            } else if !number.is_empty() {
-                break;
-            }
-        }
-        number
-    }
-
-    fn get_string_post_separator(mut string: String, separator: char) -> Option<String> {
-        let index = string.find(separator)?;
-        match string.split_off(index).trim().to_string() {
-            s if s.is_empty() => None,
-            s => Some(s),
-        }
-    }
-
-    fn get_text_from_first_result(
-        deserialized_html: &str,
-        selector: &Selector,
-    ) -> Result<String, ParserError> {
-        let html = Html::parse_document(deserialized_html);
-        let first_el = match html.select(selector).next() {
-            Some(e) => e,
-            None => return Err(ParserError::ElementNotFound),
-        };
-
-        let text = first_el
-            .text()
-            .collect::<Vec<_>>()
-            .join("")
-            .trim()
-            .to_string();
-
-        Ok(text)
-    }
-
-    fn get_src_from_first_result(
-        deserialized_html: &str,
-        selector: &Selector,
-    ) -> Result<String, ParserError> {
-        let html = Html::parse_document(deserialized_html);
-        let first_el = match html.select(selector).next() {
-            Some(e) => e,
-            None => return Err(ParserError::ElementNotFound),
-        };
-
-        match first_el.value().attr("src") {
-            Some(image_url) => Ok(image_url.to_string()),
-            None => Err(ParserError::AttributeNotFound),
-        }
-    }
-}
-
-struct AsuraScansParser;
-
-impl MangaParser for AsuraScansParser {
-    fn parse(&self, deserialized_html: &str, url: &str) -> Result<Manga, ParserError> {
-        let raw_chapter_title = ParseHelper::get_text_from_first_result(
-            deserialized_html,
-            &Selector::parse("#chapterlist > ul").unwrap(),
-        )?;
-
-        let title = ParseHelper::get_text_from_first_result(
-            deserialized_html,
-            &Selector::parse("h1").unwrap(),
-        )?;
-
-        let chapter_number = ParseHelper::get_first_number_from_string(&raw_chapter_title);
-        let chapter_title = ParseHelper::get_string_post_separator(raw_chapter_title, ':');
-        let image_url = match ParseHelper::get_src_from_first_result(
-            deserialized_html,
-            &Selector::parse("img.attachment-.size-.wp-post-image").unwrap(),
-        ) {
-            Ok(image_url) => Some(image_url),
-            Err(e) => {
-                println!("error getting the image for {}: {}", title, e);
-                None
-            }
-        };
-
-        Ok(Manga {
-            id: None,
-            title,
-            image_url,
-            urls: vec![url.to_string()],
-            chapter: chapter_number
-                .parse::<i16>()
-                .expect("error parsing chapter number"),
-            chapter_title,
-        })
-    }
 }
 
 /*
@@ -154,14 +32,16 @@ impl MangaParser for AsuraScansParser {
 #[tokio::main]
 async fn main() {
     let db_url = get_db_url();
-    let pool = get_db_client(db_url.as_str(), 5).await;
+    let _pool = get_db_client(db_url.as_str(), 5).await;
 
-    // let mangas = sqlx::query_as!(Manga, "SELECT * FROM manga")
-    //     .fetch_all(&pool)
-    //     .await
-    //     .unwrap();
+    /*
+    let mangas = sqlx::query_as!(Manga, "SELECT * FROM manga")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    */
 
-    let client = reqwest::Client::builder()
+    let client: Client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .expect("Error creating a request client");

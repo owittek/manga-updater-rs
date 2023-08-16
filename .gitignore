@@ -2,4 +2,3 @@
 /db/data
 .env
 db/init/zdummy_data.sql
-.env

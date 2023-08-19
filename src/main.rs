@@ -153,3 +153,21 @@ async fn add_manga(
     manga.id = Some(res.unwrap().id);
     Ok(manga)
 }
+
+#[allow(dead_code)]
+async fn delete_manga(pool: &Pool<Postgres>, id: i16) -> Option<String> {
+    let res = sqlx::query!(
+        r#"
+    DELETE FROM public.manga
+    WHERE id = $1
+    RETURNING title AS deleted_title;"#,
+        id
+    )
+    .fetch_one(pool)
+    .await;
+
+    match res {
+        Ok(res) => Some(res.deleted_title),
+        Err(_) => None,
+    }
+}

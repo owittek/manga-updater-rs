@@ -29,10 +29,11 @@ struct Manga {
 */
 
 // TODO: URL & timeout should be configurable via CLI
+#[allow(unused_variables)]
 #[tokio::main]
 async fn main() {
     let db_url = get_db_url();
-    let _pool = get_db_client(db_url.as_str(), 5).await;
+    let pool = get_db_client(db_url.as_str(), 5).await;
 
     /*
     let mangas = sqlx::query_as!(Manga, "SELECT * FROM manga")
